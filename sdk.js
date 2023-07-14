@@ -222,6 +222,32 @@ function uploadToFileEngine(formData, callback) {
 }
 
 /**
+ * Set Conversation Data Api
+ */
+async function setConversationData(url, conversationId, data) {
+    const response = await fetch(`${url}/${conversationId}/conversation-data`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(data)
+    });
+    return response;
+}
+
+/**
+* Get Conversation Data Api
+*/
+async function getConversationData(url, conversationId) {
+    const response = await fetch(`${url}/${conversationId}/conversation-data`);
+    if (!response.ok) {
+        throw new Error(`Failed to fetch data from ${url}/${conversationId}/conversation-data: ${response.status} ${response.statusText}`);
+    }
+    const data = await response.json();
+    return data;
+}
+
+/**
  * Webhook Notifications Functions
  * @param {*} data
  */
