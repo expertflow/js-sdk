@@ -7,9 +7,13 @@ var IP;
 var wssPort;
 var dialerURI;
 var sipPassword;
-var enableLogs;
+var enableSipLogs;
 var chatWebhook;
 var preChatForm;
+var channel;
+var webSocket;
+var iceServers;
+var wsValue;
 
 var session;
 var mediaElement;
@@ -24,6 +28,7 @@ var audio;
 var screen;
 var mediaAcquire = 'end';
 var endCallBtn = false;
+var JsSIP;
 
 /**
  *
@@ -41,12 +46,11 @@ function include(file) {
     script.defer = true;
     document.getElementsByTagName('head').item(0).appendChild(script);
 }
-// /* Include js files */
-include('https://cdn.socket.io/4.5.4/socket.io.min.js');
-include('https://cdnjs.cloudflare.com/ajax/libs/sip.js/0.15.11/sip-0.15.11.min.js');
-
 
 console.log("socket url :", socket_url);
+const loadLibrary = async () => {
+    JsSIP = await import('react-native-jssip');
+};
 let socket = {};
 
 /**
@@ -60,17 +64,32 @@ function widgetConfigs(ccmUrl, widgetIdentifier, callback) {
         .then(response => response.json())
         .then((data) => {
             callback(data);
-            wssServerIp = data.webRtc.wssServerIp;
-            wssServerPort = data.webRtc.wssServerPort;
-            diallingURI = data.webRtc.diallingUri;
-            sipExtension = data.webRtc.sipExtension;
-            extensionPassword = data.webRtc.extensionPassword;
-            enable_sip_logs = data.webRtc.enabledSipLogs;
-            enableLogs = enable_sip_logs;
-            IP = wssServerIp;
-            wssPort = wssServerPort;
-            dialerURI = 'sip:' + diallingURI + '@' + wssServerIp;
-            sipPassword = extensionPassword;
+            if (data.webRtc !== null) {
+                if (data.webRtc.enableWebRtc === true) {
+                    wssServerIp = data.webRtc.wssServerIp;
+                    wssServerPort = data.webRtc.wssServerPort;
+                    diallingURI = data.webRtc.diallingUri;
+                    sipExtension = data.webRtc.sipExtension;
+                    extensionPassword = data.webRtc.extensionPassword;
+                    enableSipLogs = data.webRtc.enabledSipLogs;
+                    iceServers = data.webRtc.iceServers;
+                    channel = data.webRtc.channel;
+                    wsValue = data.webRtc.webSocket;
+
+                    IP = wssServerIp;
+                    wssPort = wssServerPort;
+                    dialerURI = 'sip:' + diallingURI + '@' + wssServerIp;
+                    sipPassword = extensionPassword;
+
+                    if (channel == 'mobile') {
+                        loadLibrary();
+                    } else {
+                        // /* Include js files */
+                        include('https://cdn.socket.io/4.5.4/socket.io.min.js');
+                        include('https://cdnjs.cloudflare.com/ajax/libs/sip.js/0.15.11/sip-0.15.11.min.js');
+                    }
+                }
+            }
 
             chatWebhook = data.webhook_url;
             preChatForm = data.form;
@@ -327,7 +346,7 @@ function sendMessage(data) {
         if (res.code !== 200) {
             console.log("message not sent");
         }
-    })
+    });
 }
 /**
  * End Chat Socket Event with Customer Data in the parameter
@@ -461,18 +480,33 @@ function dialCall(eventsCallback) {
     getDynamicExt().then((extension) => {
         ext = extension;
         console.log(wssServerIp, 'ip at call time');
-        userAgent = new SIP.UA({
-            uri: extension + '@' + wssServerIp,
-            transportOptions: { wsServers: 'wss://' + wssServerIp + ':' + wssServerPort, traceSip: true },
-            authorizationUser: extension,
-            password: extensionPassword,
-            log: {
-                builtinEnabled: enableLogs,
-                level: 3
-            },
-            register: true
-        });
+        if (channel.toLowerCase() == "web") {
+            userAgent = new SIP.UA({
+                uri: extension + '@' + IP,
+                transportOptions: { wsServers: wsValue + '://' + IP + ':' + wssPort, traceSip: true },
+                authorizationUser: extension,
+                password: sipPassword,
+                log: {
+                    builtinEnabled: enableSipLogs,
+                    level: 3 // log log level
+                },
+                register: true
+            });
+        }
+        if (channel.toLowerCase() == "mobile") {
+            socket = new JsSIP.WebSocketInterface(wsValue + '://' + IP + ':' + wssPort);
+            var configuration = {
+                sockets: [socket],
+                uri: 'sip:' + extension + '@' + IP,
+                password: sipPassword,
+                display_name: extension,
+                register_expires: 9500,
+                session_timers: false,
+                register: true
+            }
+            userAgent = new JsSIP.UA(configuration);
 
+        }
         userAgent.start();
 
         if (typeof eventsCallback === "function") {
@@ -483,6 +517,10 @@ function dialCall(eventsCallback) {
             };
             eventsCallback(event);
         }
+
+        userAgent.on('newRTCSession', function (e) {
+            console.log('New webRtc session created!', e);
+        });
 
         userAgent.on('unregistered', function (response, cause) {
             register = false;
@@ -531,9 +569,9 @@ function dialCall(eventsCallback) {
         });
 }
 
-function endCall() {
+function endCall(eventsCallback) {
     if (session === true) {
-        close_session();
+        close_session(eventsCallback);
         clearInterval(countervar);
     } else {
         toggleFab();
@@ -552,44 +590,74 @@ function endCall() {
  */
 const sendInvite = (mediaType, videoName, videoLocal, userData, eventsCallback) => {
     return new Promise((resolve, reject) => {
-        var mediaConstraints = { audio: true, video: true };
-        toggleVideo = 'web_cam';
-        mediaElement = document.getElementById(videoName);
-        if (videoLocal === '') {
-            mediaLocal = '';
-        } else {
-            mediaLocal = document.getElementById(videoLocal);
-        }
-        audio = 'true';
-        if (mediaType === 'audio') {
-            mediaConstraints = { audio: true, video: false };
-            video = 'false';
-        } else {
-            mediaConstraints = { audio: true, video: true };
-            video = 'true';
-        }
-        screen = 'false';
 
-        console.log("invite function has been triggered");
-        if (userData !== null) {
-            var extraHeaderString = [];
-            var index = 0;
-            for (const key in userData) {
-                if (typeof userData[key] === 'string') {
+        if (channel.toLowerCase() == 'web') {
+            var mediaConstraints = { audio: true, video: true };
+            toggleVideo = 'web_cam';
+            mediaElement = document.getElementById(videoName);
+            if (videoLocal === '') {
+                mediaLocal = '';
+            } else {
+                mediaLocal = document.getElementById(videoLocal);
+            }
+            audio = 'true';
+            if (mediaType === 'audio') {
+                mediaConstraints = { audio: true, video: false };
+                video = 'false';
+            } else {
+                mediaConstraints = { audio: true, video: true };
+                video = 'true';
+            }
+            screen = 'false';
+
+            console.log("invite function has been triggered");
+            if (userData !== null) {
+                var extraHeaderString = [];
+                var index = 0;
+                for (const key in userData) {
+                    if (typeof userData[key] === 'string') {
+                        var keyvalue = userData[key].trim();
+                        extraHeaderString.push('X-variable' + index + ":" + key + "|" + keyvalue);
+                        index++;
+                    } else {
+                        console.warn(`Value for key ${key} is not a string and will be skipped.`);
+                    }
+                }
+            }
+            session = userAgent.invite('sip:' + diallingURI + '@' + wssServerIp, {
+                sessionDescriptionHandlerOptions: {
+                    constraints: mediaConstraints
+                }
+                , extraHeaders: extraHeaderString
+            });
+        }
+
+        if (channel.toLowerCase() == 'mobile') {
+            var videoValue = false;
+            if (videoLocal !== '') {
+                videoValue = true;
+            }
+
+            if (userData !== null) {
+                var extraHeaderString = [];
+                var index = 0;
+                for (const key in userData) {
                     var keyvalue = userData[key].trim();
                     extraHeaderString.push('X-variable' + index + ":" + key + "|" + keyvalue);
                     index++;
-                } else {
-                    console.warn(`Value for key ${key} is not a string and will be skipped.`);
                 }
             }
+            var options = {
+                mediaConstraints: { audio: true, video: videoControl },
+                extraHeaders: extraHeaderString,
+                sessionTimersExpires: 1020,
+                psConfig: {
+                    iceServers: iceServers,
+                },
+            };
+            session = userAgent.call(dialerURI, options);
         }
-        session = userAgent.invite('sip:' + diallingURI + '@' + wssServerIp, {
-            sessionDescriptionHandlerOptions: {
-                constraints: mediaConstraints
-            }
-            , extraHeaders: extraHeaderString
-        });
+
         if (typeof eventsCallback === "function") {
             let event = {
                 event: 'Channel Creating',
@@ -600,26 +668,28 @@ const sendInvite = (mediaType, videoName, videoLocal, userData, eventsCallback) 
         }
         session.on('accepted', function () {
             // Assumes you have a media element on the DOM
-            const remoteStream = new MediaStream();
-            if (video === 'false') {
-                console.log("closing video")
-            }
-            session.sessionDescriptionHandler.peerConnection.getReceivers().forEach((receiver) => {
-                if (receiver.track) {
-                    console.log(receiver.track);
-                    remoteStream.addTrack(receiver.track);
+            if (channel.toLowerCase() == 'web') {
+                const remoteStream = new MediaStream();
+                if (video === 'false') {
+                    console.log("closing video")
                 }
-            });
-            mediaElement.srcObject = remoteStream;
-            if (mediaLocal !== '') {
-                const localStream = new MediaStream();
-                session.sessionDescriptionHandler.peerConnection.getSenders().forEach((sender) => {
-                    if (sender.track.kind === "video") {
-                        console.log(sender.track);
-                        localStream.addTrack(sender.track);
+                session.sessionDescriptionHandler.peerConnection.getReceivers().forEach((receiver) => {
+                    if (receiver.track) {
+                        console.log(receiver.track);
+                        remoteStream.addTrack(receiver.track);
                     }
                 });
-                mediaLocal.srcObject = localStream;
+                mediaElement.srcObject = remoteStream;
+                if (mediaLocal !== '') {
+                    const localStream = new MediaStream();
+                    session.sessionDescriptionHandler.peerConnection.getSenders().forEach((sender) => {
+                        if (sender.track.kind === "video") {
+                            console.log(sender.track);
+                            localStream.addTrack(sender.track);
+                        }
+                    });
+                    mediaLocal.srcObject = localStream;
+                }
             }
             if (typeof eventsCallback === "function") {
                 let event = {
@@ -629,7 +699,7 @@ const sendInvite = (mediaType, videoName, videoLocal, userData, eventsCallback) 
                 };
                 eventsCallback(event);
             }
-        })
+        });
         session.on('progress', function (response) {
             if (typeof eventsCallback === "function") {
                 let event = {
@@ -639,7 +709,7 @@ const sendInvite = (mediaType, videoName, videoLocal, userData, eventsCallback) 
                 };
                 eventsCallback(event);
             }
-        })
+        });
         session.on('rejected', function (response, cause) {
             if (typeof eventsCallback === "function") {
                 let event = {
@@ -649,8 +719,7 @@ const sendInvite = (mediaType, videoName, videoLocal, userData, eventsCallback) 
                 };
                 eventsCallback(event);
             }
-        })
-
+        });
         session.on('failed', function (response, cause) {
             if (typeof eventsCallback === "function") {
                 let event = {
@@ -665,7 +734,18 @@ const sendInvite = (mediaType, videoName, videoLocal, userData, eventsCallback) 
             };
 
             userAgent.unregister(options);
-        })
+        });
+        session.on('ended', function (response, cause) {
+            console.log('failed');
+            if (typeof eventsCallback === 'function') {
+                let event = {
+                    event: 'session-ended',
+                    response: response,
+                    cause: cause,
+                };
+                events_callback(event);
+            }
+        });
         session.on('terminated', function (message, cause) {
             closeSession(eventsCallback);
             if (typeof eventsCallback === "function") {
@@ -676,7 +756,7 @@ const sendInvite = (mediaType, videoName, videoLocal, userData, eventsCallback) 
                 };
                 eventsCallback(event);
             }
-        })
+        });
         session.on('bye', function (request) {
             if (typeof eventsCallback === "function") {
                 let event = {
@@ -686,7 +766,7 @@ const sendInvite = (mediaType, videoName, videoLocal, userData, eventsCallback) 
                 };
                 eventsCallback(event);
             }
-        })
+        });
         session.on('iceConnectionDisconnected', function () {
             if (typeof eventsCallback === "function") {
                 let event = {
@@ -696,7 +776,7 @@ const sendInvite = (mediaType, videoName, videoLocal, userData, eventsCallback) 
                 };
                 eventsCallback(event);
             }
-        })
+        });
         session.on('SessionDescriptionHandler-created', function () {
             session.sessionDescriptionHandler.on('getDescription', function (sdpWrapper) {
                 if (typeof eventsCallback === "function") {
@@ -744,12 +824,9 @@ const sendInvite = (mediaType, videoName, videoLocal, userData, eventsCallback) 
                 };
                 eventsCallback(event);
             }
-
         });
         resolve("successful");
-
     });
-
 }
 /**
  * Close Video Function
@@ -915,27 +992,27 @@ window.videoControl = videoControl;
 window.audioControl = audioControl;
 window.screenControl = screenControl;
 
-// module.exports = {
-//     videoControl,
-//     audioControl,
-//     dialCall,
-//     endCall,
-//     sendInvite,
-//     closeSession,
-//     terminateCurrentSession,
-//     widgetConfigs,
-//     getPreChatForm,
-//     formValidation,
-//     establishConnection,
-//     chatRequest,
-//     sendMessage,
-//     chatEnd,
-//     resumeChat,
-//     sendJoinConversation,
-//     getInitChat,
-//     uploadToFileEngine,
-//     setConversationData,
-//     getConversationData,
-//     webhookNotifications
+module.exports = {
+    videoControl,
+    audioControl,
+    dialCall,
+    endCall,
+    sendInvite,
+    closeSession,
+    terminateCurrentSession,
+    widgetConfigs,
+    getPreChatForm,
+    formValidation,
+    establishConnection,
+    chatRequest,
+    sendMessage,
+    chatEnd,
+    resumeChat,
+    sendJoinConversation,
+    getInitChat,
+    uploadToFileEngine,
+    setConversationData,
+    getConversationData,
+    webhookNotifications
 
-// }
+}
